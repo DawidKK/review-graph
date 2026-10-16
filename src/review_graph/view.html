@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="pl">
+  <meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+  />
+  <title>Review · Graphify</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font: 14px system-ui;
+      background: #10151e;
+      color: #e0e6ef;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+    }
+    header {
+      padding: 20px 24px;
+      border-bottom: 1px solid #303d50;
+      display: flex;
+      gap: 20px;
+      align-items: center;
+    }
+    h1 {
+      font-size: 20px;
+      margin: 0;
+    }
+    small {
+      color: #a4b3c8;
+    }
+    #summary {
+      flex: 1;
+    }
+    input,
+    button {
+      background: #202c3e;
+      color: inherit;
+      border: 1px solid #52627a;
+      border-radius: 7px;
+      padding: 9px;
+    }
+    input {
+      width: 250px;
+    }
+    button {
+      cursor: pointer;
+    }
+    main {
+      display: grid;
+      grid-template-columns: 330px 1fr;
+      height: calc(100vh - 121px);
+    }
+    aside {
+      padding: 18px;
+      overflow: auto;
+      border-right: 1px solid #303d50;
+    }
+    #canvas {
+      overflow: hidden;
+      position: relative;
+    }
+    svg {
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+      cursor: grab;
+    }
+    svg:active {
+      cursor: grabbing;
+    }
+    .legend {
+      padding: 10px 24px;
+      background: #182131;
+      display: flex;
+      gap: 22px;
+    }
+    .changed {
+      color: #ffc36e;
+    }
+    .context {
+      color: #8ebcfa;
+    }
+    .deleted {
+      color: #ff8c98;
+    }
+    #notice {
+      white-space: pre-wrap;
+      color: #f5c781;
+      font-size: 12px;
+    }
+    #files button {
+      display: block;
+      width: 100%;
+      text-align: left;
+      margin: 7px 0;
+      overflow-wrap: anywhere;
+      font: 12px ui-monospace, monospace;
+    }
+    h2 {
+      font-size: 15px;
+    }
+    pre {
+      font-size: 11px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: #aebfd7;
+    }
+    .node {
+      cursor: pointer;
+    }
+    .node rect {
+      fill: #1b2b43;
+      stroke: #7ba6df;
+      stroke-width: 1.6;
+    }
+    .node.changed rect {
+      fill: #3b2d1c;
+      stroke: #ffc36e;
+      stroke-width: 2.5;
+    }
+    .node.deleted rect {
+      fill: #38202a;
+      stroke: #ff8c98;
+      stroke-dasharray: 6 4;
+    }
+    .node.selected rect {
+      stroke: white;
+      stroke-width: 4;
+    }
+    .node text {
+      fill: #e0e6ef;
+      font: 12px ui-monospace, monospace;
+    }
+    .node .status {
+      fill: #b1c1d5;
+      font-size: 10px;
+    }
+    .edge {
+      fill: none;
+      stroke: #667b99;
+      stroke-width: 1.5;
+      cursor: pointer;
+    }
+    .edge.selected {
+      stroke: #ffc36e;
+      stroke-width: 3;
+    }
+    .edge-label {
+      fill: #bdcce1;
+      font: 10px system-ui;
+      paint-order: stroke;
+      stroke: #10151e;
+      stroke-width: 4;
+      cursor: pointer;
+    }
+    .dim {
+      opacity: 0.13;
+    }
+    #empty {
+      position: absolute;
+      top: 30%;
+      left: 15%;
+      color: #a4b3c8;
+    }
+    a {
+      color: #9ac2ff;
+    }
+  </style>
+  <header>
+    <div>
+      <h1>Review <small>× Graphify</small></h1>
+      <small id="root"></small>
+    </div>
+    <div id="summary">Oczekiwanie na analizę…</div>
+    <input
+      id="search"
+      placeholder="Filtruj ścieżki plików"
+      aria-label="Filtruj pliki"
+    /><button id="fit">Dopasuj</button>
+  </header>
+  <div class="legend">
+    <span class="changed">● Zmienione</span
+    ><span class="context">● Bez zmian · bezpośredni sąsiedzi</span
+    ><span class="deleted">┄ Usunięte / stara nazwa</span
+    ><small
+      >Strzałka = kierunek relacji Graphify · kółko myszy: zoom · przeciąganie:
+      przesuwanie</small
+    >
+  </div>
+  <main>
+    <aside>
+      <div id="notice"></div>
+      <h2>Zmienione pliki</h2>
+      <small
+        >Graf opisuje bieżące pliki robocze. Status Git obejmuje też
+        indeks.</small
+      >
+      <div id="files"></div>
+      <h2 id="detail-title">Powiązania</h2>
+      <div id="detail">
+        Kliknij plik lub krawędź, aby zobaczyć rodzaj relacji i dowody Graphify.
+      </div>
+    </aside>
+    <div id="canvas">
+      <svg id="svg" aria-label="Graf plików">
+        <defs>
+          <marker
+            id="arrow"
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="7"
+            markerHeight="7"
+            orient="auto-start-reverse"
+          >
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#8ca5c8" />
+          </marker>
+        </defs>
+        <g id="scene"></g>
+      </svg>
+      <div id="empty"></div>
+    </div>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id),
+      ns = "http://www.w3.org/2000/svg";
+    let graph = null,
+      revision = -1,
+      selected = null,
+      box = null,
+      extent = null,
+      drag = null;
+    function el(tag, attrs = {}, content) {
+      const n = document.createElementNS(ns, tag);
+      for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+      if (content !== undefined) n.textContent = content;
+      return n;
+    }
+    function status(n) {
+      const s = n.status;
+      if (!s) return "bez zmian";
+      const a = [];
+      if (s.staged) a.push("staged");
+      if (s.unstaged) a.push("unstaged");
+      if (s.untracked) a.push("untracked");
+      if (s.deleted) a.push("usunięty / stara nazwa");
+      if (!n.in_graph) a.push("brak w grafie Graphify");
+      return `${s.xy} · ${a.join(" · ")}`;
+    }
+    function kinds(e) {
+      return [
+        ...new Set(
+          e.evidence.map(
+            (x) => x.relation || x.relationship || x.type || "relacja bez opisu"
+          )
+        ),
+      ].join(", ");
+    }
+    function evidence(edges) {
+      $("detail").replaceChildren();
+      if (!edges.length) {
+        $("detail").textContent =
+          "Brak międzyplikowych powiązań w aktualnych danych Graphify. Nie dodajemy domyślnych relacji.";
+        return;
+      }
+      for (const e of edges) {
+        const h = document.createElement("p");
+        h.textContent = `${e.source} → ${e.target} · ${kinds(e)} (${
+          e.evidence.length
+        })`;
+        $("detail").append(h);
+        const d = document.createElement("details"),
+          s = document.createElement("summary"),
+          p = document.createElement("pre");
+        s.textContent = "Dowody i metadane Graphify";
+        p.textContent = JSON.stringify(e.evidence, null, 2);
+        d.append(s, p);
+        $("detail").append(d);
+      }
+    }
+    function select(id) {
+      selected = id;
+      $("detail-title").textContent = id || "Powiązania";
+      evidence(graph.edges.filter((e) => e.source === id || e.target === id));
+      draw();
+    }
+    function view() {
+      if (box) $("svg").setAttribute("viewBox", box.join(" "));
+    }
+    function fit() {
+      if (!extent) return;
+      const w = $("svg").clientWidth,
+        h = $("svg").clientHeight,
+        scale = Math.max(extent[2] / w, extent[3] / h);
+      box = [-30, -30, w * scale + 60, h * scale + 60];
+      view();
+    }
+    function draw() {
+      if (!graph) return;
+      const query = $("search").value.toLowerCase(),
+        all = graph.nodes,
+        match = new Set(
+          all.filter((n) => n.id.toLowerCase().includes(query)).map((n) => n.id)
+        );
+      const edges = graph.edges.filter(
+        (e) => match.has(e.source) || match.has(e.target)
+      );
+      const visible = new Set(match);
+      edges.forEach((e) => {
+        visible.add(e.source);
+        visible.add(e.target);
+      });
+      const nodes = all.filter((n) => visible.has(n.id));
+      const changed = nodes.filter((n) => n.changed),
+        context = nodes.filter((n) => !n.changed);
+      const pos = new Map();
+      [changed, context].forEach((group, col) =>
+        group.forEach((n, i) => pos.set(n.id, [col * 770 + 40, i * 100 + 35]))
+      );
+      extent = [
+        0,
+        0,
+        1280,
+        Math.max(changed.length, context.length, 1) * 100 + 60,
+      ];
+      const scene = $("scene");
+      scene.replaceChildren();
+      for (const e of edges) {
+        const [sx, sy] = pos.get(e.source),
+          [tx, ty] = pos.get(e.target);
+        let x1 = sx + 380,
+          y1 = sy + 37,
+          x2 = tx,
+          y2 = ty + 37;
+        let path;
+        if (sx === tx) {
+          x2 = tx + 380;
+          const bend = x1 + 65 + Math.min(Math.abs(y2 - y1) * 0.12, 100);
+          path = `M${x1},${y1} C${bend},${y1} ${bend},${y2} ${x2},${y2}`;
+        } else if (sx > tx) {
+          x1 = sx;
+          x2 = tx + 380;
+          path = `M${x1},${y1} C${x1 - 200},${y1} ${
+            x2 + 200
+          },${y2} ${x2},${y2}`;
+        } else
+          path = `M${x1},${y1} C${x1 + 180},${y1} ${
+            x2 - 180
+          },${y2} ${x2},${y2}`;
+        const active = e.source === selected || e.target === selected;
+        const p = el("path", {
+          d: path,
+          class: `edge ${active ? "selected" : ""} ${
+            selected && !active ? "dim" : ""
+          }`,
+          "marker-end": "url(#arrow)",
+        });
+        const label = el(
+          "text",
+          {
+            x: (x1 + x2) / 2 + (sx === tx ? 80 : 0),
+            y: (y1 + y2) / 2 - 5,
+            "text-anchor": "middle",
+            class: `edge-label ${selected && !active ? "dim" : ""}`,
+          },
+          `${kinds(e)} ×${e.evidence.length}`
+        );
+        const title = el("title", {}, `${e.source} → ${e.target}\n${kinds(e)}`);
+        p.append(title);
+        const click = () => {
+          $("detail-title").textContent = "Relacja między plikami";
+          evidence([e]);
+        };
+        p.onclick = click;
+        label.onclick = click;
+        scene.append(p, label);
+      }
+      for (const n of nodes) {
+        const [x, y] = pos.get(n.id),
+          g = el("g", {
+            transform: `translate(${x},${y})`,
+            class: `node ${n.changed ? "changed" : ""} ${
+              n.status?.deleted ? "deleted" : ""
+            } ${selected === n.id ? "selected" : ""}`,
+            tabindex: 0,
+            role: "button",
+            "aria-label": n.id,
+          });
+        g.append(
+          el("rect", { width: 380, height: 76, rx: 9 }),
+          el("title", {}, `${n.id}\n${status(n)}`)
+        );
+        const chunks = n.id.match(/.{1,48}/gu) || [""];
+        const label = el("text", { x: 12, y: 20 });
+        chunks
+          .slice(0, 2)
+          .forEach((s, i) =>
+            label.append(
+              el(
+                "tspan",
+                { x: 12, dy: i ? 16 : 0 },
+                s + (i === 1 && chunks.length > 2 ? "…" : "")
+              )
+            )
+          );
+        g.append(
+          label,
+          el("text", { x: 12, y: 63, class: "status" }, status(n).slice(0, 65))
+        );
+        g.onclick = () => select(n.id);
+        g.onkeydown = (e) => {
+          if (e.key === "Enter") select(n.id);
+        };
+        scene.append(g);
+      }
+      $("empty").textContent = nodes.length
+        ? ""
+        : "Brak zmienionych plików pasujących do filtra.";
+      if (!box) fit();
+    }
+    $("search").oninput = draw;
+    $("fit").onclick = fit;
+    $("svg").addEventListener(
+      "wheel",
+      (e) => {
+        e.preventDefault();
+        if (!box) return;
+        const r = $("svg").getBoundingClientRect(),
+          px = (e.clientX - r.left) / r.width,
+          py = (e.clientY - r.top) / r.height,
+          k = e.deltaY > 0 ? 1.12 : 1 / 1.12;
+        box = [
+          box[0] + box[2] * px * (1 - k),
+          box[1] + box[3] * py * (1 - k),
+          box[2] * k,
+          box[3] * k,
+        ];
+        view();
+      },
+      { passive: false }
+    );
+    $("svg").onpointerdown = (e) => {
+      if (e.target.closest(".node") || e.target.closest(".edge") || !box)
+        return;
+      drag = [e.clientX, e.clientY, ...box];
+      $("svg").setPointerCapture(e.pointerId);
+    };
+    $("svg").onpointermove = (e) => {
+      if (!drag) return;
+      box = [
+        drag[2] - ((e.clientX - drag[0]) * drag[4]) / $("svg").clientWidth,
+        drag[3] - ((e.clientY - drag[1]) * drag[5]) / $("svg").clientHeight,
+        drag[4],
+        drag[5],
+      ];
+      view();
+    };
+    $("svg").onpointerup = () => (drag = null);
+    $("svg").onpointercancel = () => (drag = null);
+    async function poll() {
+      try {
+        const response = await fetch("data", { cache: "no-store" });
+        if (!response.ok) throw Error(`HTTP ${response.status}`);
+        const s = await response.json();
+        $("notice").textContent = s.error
+          ? `Błąd odświeżania — poprzedni graf pozostaje widoczny.\n${s.error}`
+          : s.busy
+          ? "Analiza Graphify w tle…"
+          : "";
+        if (s.data && s.revision !== revision) {
+          revision = s.revision;
+          graph = s.data;
+          $("root").textContent = graph.root;
+          const changed = graph.nodes.filter((n) => n.changed);
+          $("summary").textContent = `${changed.length} zmienionych · ${
+            graph.nodes.length - changed.length
+          } sąsiadów · ${graph.edges.length} relacji plików · ${
+            graph.generated
+          }`;
+          $("files").replaceChildren();
+          for (const n of changed) {
+            const b = document.createElement("button");
+            b.textContent = n.id + "\n" + status(n);
+            b.onclick = () => select(n.id);
+            $("files").append(b);
+          }
+          draw();
+          if (selected)
+            evidence(
+              graph.edges.filter(
+                (e) => e.source === selected || e.target === selected
+              )
+            );
+        }
+      } catch (e) {
+        $(
+          "notice"
+        ).textContent = `Utracono połączenie: ${e.message}. Ponów Spacja g r w Neovimie.`;
+      } finally {
+        setTimeout(poll, 2000);
+      }
+    }
+    poll();
+  </script>
+</html>
