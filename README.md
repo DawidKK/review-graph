@@ -24,11 +24,9 @@ The package is named `graphifyy`; its command is `graphify`.
 
 ### 2. Clone and install Review Graph
 
-Replace `REPOSITORY_URL` with this repository's clone URL:
-
 ```zsh
-git clone "REPOSITORY_URL" "$HOME/review-graph"
-cd "$HOME/review-graph"
+git clone https://github.com/DawidKK/review-graph
+cd review-graph
 uv sync --python 3.14
 ```
 
@@ -37,7 +35,6 @@ uv sync --python 3.14
 Add this to `~/.zshrc`, replacing any existing `review` alias or function:
 
 ```zsh
-export PATH="$HOME/.local/bin:$PATH"
 unalias review 2>/dev/null
 review() {
   "$HOME/review-graph/.venv/bin/review" "$@"
