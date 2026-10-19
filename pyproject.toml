@@ -5,11 +5,12 @@ build-backend = "uv_build"
 [project]
 name = "review-graph"
 version = "0.1.0"
-description = "Local Graphify dependency graphs alongside Neovim Diffview reviews"
+description = "Terminal Git diff reviews with local Graphify dependency graphs"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = ["textual>=6,<7", "rich>=14,<15", "pygments>=2.19,<3"]
 
 [project.scripts]
+review = "review_graph.terminal:main"
 review-graph = "review_graph.cli:main"
 review-graph-install-neovim = "review_graph.install:install"

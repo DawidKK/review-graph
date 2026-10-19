@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -16,7 +17,7 @@ import urllib.error
 import urllib.request
 from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 
@@ -27,7 +28,9 @@ def git(root: Path, *args: str) -> bytes:
 def changes(root: Path) -> dict:
     """Read both index columns, NUL-delimited paths and rename source paths."""
     records = iter(
-        git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all").split(b"\0")
+        git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all").split(
+            b"\0"
+        )
     )
     result = {}
     for record in records:
@@ -80,7 +83,12 @@ def aggregate(graph: dict, changed: dict, root: Path) -> dict:
     covered = set(owners.values())
     return {
         "nodes": [
-            {"id": p, "changed": p in changed, "status": changed.get(p), "in_graph": p in covered}
+            {
+                "id": p,
+                "changed": p in changed,
+                "status": changed.get(p),
+                "in_graph": p in covered,
+            }
             for p in sorted(visible)
         ],
         "edges": [
@@ -103,6 +111,7 @@ class Review:
         self.error = None
         self.data = None
         self.revision = 0
+        self.selection = {"revision": 0, "path": None}
         self.last_seen = 0
         self.open_after = False
         self.opened = False
@@ -114,7 +123,9 @@ class Review:
             if action == "open" and self.data:
                 self.open_browser()
                 return
-            self.open_after = self.open_after or not self.opened or action in {"open", "start"}
+            self.open_after = (
+                self.open_after or not self.opened or action in {"open", "start"}
+            )
             self.pending = True
             self.condition.notify()
 
@@ -132,10 +143,14 @@ class Review:
                 self.pending, self.busy, self.error = False, True, None
             try:
                 # A fresh output avoids stale/deleted symbols and the smaller-graph guard.
-                with tempfile.TemporaryDirectory(prefix="build-", dir=self.state) as output:
+                with tempfile.TemporaryDirectory(
+                    prefix="build-", dir=self.state
+                ) as output:
                     executable = shutil.which("graphify")
                     if not executable:
-                        raise RuntimeError("graphify missing; run: uv tool install graphifyy")
+                        raise RuntimeError(
+                            "graphify missing; run: uv tool install graphifyy"
+                        )
                     with (self.state / "extract.log").open("w") as log:
                         subprocess.run(
                             [
@@ -160,11 +175,14 @@ class Review:
                     ]
                     source = next((p for p in candidates if p.exists()), None)
                     if source is None:
-                        raise RuntimeError("Graphify produced no graph.json; see extract.log")
+                        raise RuntimeError(
+                            "Graphify produced no graph.json; see extract.log"
+                        )
                     raw = source.read_bytes()
                     snapshot = aggregate(json.loads(raw), changes(self.root), self.root)
                     snapshot.update(
-                        root=str(self.root), generated=time.strftime("%Y-%m-%d %H:%M:%S")
+                        root=str(self.root),
+                        generated=time.strftime("%Y-%m-%d %H:%M:%S"),
                     )
                     (self.state / "graph.json.tmp").write_bytes(raw)
                     (self.state / "graph.json.tmp").replace(self.state / "graph.json")
@@ -178,14 +196,16 @@ class Review:
                         self.open_after = False
             except Exception as exc:
                 with self.condition:
-                    self.error = f"{type(exc).__name__}: {exc}. See {self.state / 'extract.log'}"
+                    self.error = (
+                        f"{type(exc).__name__}: {exc}. See {self.state / 'extract.log'}"
+                    )
                 print(self.error, file=sys.stderr, flush=True)
             finally:
                 with self.condition:
                     self.busy = False
 
 
-def serve(root: Path, state: Path) -> None:
+def create_server(root: Path, state: Path) -> tuple[ThreadingHTTPServer, Review]:
     token = secrets.token_urlsafe(32)
     review = Review(root, state, token)
     page = Path(__file__).with_name("view.html").read_bytes()
@@ -210,9 +230,9 @@ def serve(root: Path, state: Path) -> None:
 
         def authenticated(self) -> bool:
             host = self.headers.get("Host", "")
-            return host == urlsplit(review.url).netloc and urlsplit(self.path).path.startswith(
-                f"/{token}/"
-            )
+            return host == urlsplit(review.url).netloc and urlsplit(
+                self.path
+            ).path.startswith(f"/{token}/")
 
         def do_GET(self):
             if not self.authenticated():
@@ -233,8 +253,13 @@ def serve(root: Path, state: Path) -> None:
                 self.respond(200, body, "application/json")
             elif route == "":
                 self.respond(200, page, "text/html; charset=utf-8")
+            elif route == "selection":
+                with review.condition:
+                    review.last_seen = time.monotonic()
+                    body = json.dumps(review.selection).encode()
+                self.respond(200, body, "application/json")
             elif route == "health":
-                self.respond(200, b"review-graph-v1", "text/plain")
+                self.respond(200, b"review-graph-v2", "text/plain")
             else:
                 self.respond(404, b"Not found", "text/plain")
 
@@ -242,10 +267,35 @@ def serve(root: Path, state: Path) -> None:
             route = urlsplit(self.path).path.rsplit("/", 1)[-1]
             if (
                 not self.authenticated()
-                or route not in {"refresh", "open", "start"}
+                or route not in {"refresh", "open", "start", "selection"}
                 or self.headers.get("X-Review-Token") != token
             ):
                 self.respond(403, b"Forbidden", "text/plain")
+                return
+            if route == "selection":
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= 16384:
+                        raise ValueError("Invalid selection length")
+                    path = json.loads(self.rfile.read(length))["path"]
+                    if path is not None and (
+                        not isinstance(path, str)
+                        or not path
+                        or "\0" in path
+                        or PurePosixPath(path).is_absolute()
+                        or ".." in PurePosixPath(path).parts
+                    ):
+                        raise ValueError("Expected a repository-relative path")
+                except ValueError, KeyError, TypeError:
+                    self.respond(400, b"Invalid selection", "text/plain")
+                    return
+                with review.condition:
+                    if path != review.selection["path"]:
+                        review.selection = {
+                            "revision": review.selection["revision"] + 1,
+                            "path": path,
+                        }
+                self.respond(202, b"selected", "text/plain")
                 return
             review.request(route)
             self.respond(202, b"queued", "text/plain")
@@ -255,6 +305,11 @@ def serve(root: Path, state: Path) -> None:
     info = {"url": review.url, "token": token, "pid": os.getpid(), "root": str(root)}
     (state / "server.json.tmp").write_text(json.dumps(info))
     (state / "server.json.tmp").replace(state / "server.json")
+    return server, review
+
+
+def serve(root: Path, state: Path) -> None:
+    server, _ = create_server(root, state)
     server.serve_forever()
 
 
@@ -262,25 +317,145 @@ def connect(state: Path) -> dict | None:
     try:
         info = json.loads((state / "server.json").read_text())
         with urllib.request.urlopen(info["url"] + "health", timeout=1) as response:
-            if response.read() == b"review-graph-v1":
+            if response.read() == b"review-graph-v2":
                 return info
     except OSError, ValueError, urllib.error.URLError:
         pass
     return None
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["refresh", "open", "start", "serve", "status"])
-    parser.add_argument("path", nargs="?", default=".")
-    args = parser.parse_args()
-    root = Path(os.fsdecode(git(Path(args.path).resolve(), "rev-parse", "--show-toplevel")).strip())
-    # git-path gives each worktree private, ignored state without touching .gitignore.
-    state = Path(
+def state_path(root: Path) -> Path:
+    """Each worktree has private ignored state, including its selection channel."""
+    return Path(
         os.fsdecode(
-            git(root, "rev-parse", "--path-format=absolute", "--git-path", "review-graph")
+            git(
+                root,
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "review-graph",
+            )
         ).strip()
     )
+
+
+def send_selection(root: Path, path: str | None) -> bool:
+    """Update an existing graph without starting analysis or opening a browser."""
+    info = connect(state_path(root))
+    if info is None:
+        return False
+    request = urllib.request.Request(
+        info["url"] + "selection",
+        data=json.dumps({"path": path}).encode(),
+        headers={"X-Review-Token": info["token"], "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=2) as response:
+        response.read()
+    return True
+
+
+def start_server(root: Path, state: Path) -> tuple[subprocess.Popen, dict]:
+    """Start a private process group, including any Graphify extraction children."""
+    with (state / "server.log").open("a") as log:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "review_graph.cli", "serve", str(root)],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            start_new_session=True,
+        )
+    try:
+        for _ in range(100):
+            info = connect(state)
+            if info and info["pid"] == process.pid:
+                return process, info
+            if process.poll() is not None:
+                raise RuntimeError(f"Server failed; see {state / 'server.log'}")
+            time.sleep(0.05)
+        raise RuntimeError(f"Server startup timed out; see {state / 'server.log'}")
+    except BaseException:
+        stop_process_group(process.pid)
+        process.wait(timeout=5)
+        raise
+
+
+def stop_process_group(pid: int) -> None:
+    """Stop the server and its children, never the caller's process group."""
+    try:
+        if os.getpgid(pid) == pid:
+            os.killpg(pid, signal.SIGTERM)
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+
+class GraphSession:
+    """The newest terminal owns a fresh server; older terminals cannot stop it."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.lock = threading.Lock()
+        self.closed = False
+        self.process = None
+        self.info = None
+
+    def request(self, action: str) -> bool:
+        # A cancelled Textual worker can leave a thread running: serialize startup,
+        # requests and teardown so exiting cannot leave a late server behind.
+        with self.lock:
+            if self.closed:
+                return False
+            if self.info is None:
+                state = state_path(self.root)
+                state.mkdir(mode=0o700, parents=True, exist_ok=True)
+                with (state / "startup.lock").open("a") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    previous = connect(state)
+                    if previous:
+                        stop_process_group(previous["pid"])
+                        for _ in range(100):
+                            if connect(state) is None:
+                                break
+                            time.sleep(0.05)
+                        else:
+                            raise RuntimeError("Previous graph server did not stop")
+                    self.process, self.info = start_server(self.root, state)
+            request = urllib.request.Request(
+                self.info["url"] + action,
+                data=b"",
+                headers={"X-Review-Token": self.info["token"]},
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                response.read()
+            return True
+
+    def close(self) -> None:
+        with self.lock:
+            self.closed = True
+            if self.process is not None and self.process.poll() is None:
+                stop_process_group(self.process.pid)
+                try:
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                    self.process.wait(timeout=5)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "action", choices=["refresh", "open", "start", "serve", "status"]
+    )
+    parser.add_argument("path", nargs="?", default=".")
+    args = parser.parse_args()
+    root = Path(
+        os.fsdecode(
+            git(Path(args.path).resolve(), "rev-parse", "--show-toplevel")
+        ).strip()
+    )
+    # git-path gives each worktree private, ignored state without touching .gitignore.
+    state = state_path(root)
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     if args.action == "serve":
         serve(root, state)
@@ -292,23 +467,7 @@ def main() -> None:
             print(json.dumps(info))
             return
         if not info:
-            with (state / "server.log").open("a") as log:
-                process = subprocess.Popen(
-                    [sys.executable, "-m", "review_graph.cli", "serve", str(root)],
-                    stdin=subprocess.DEVNULL,
-                    stdout=log,
-                    stderr=log,
-                    start_new_session=True,
-                )
-            for _ in range(100):
-                info = connect(state)
-                if info:
-                    break
-                if process.poll() is not None:
-                    raise RuntimeError(f"Server failed; see {state / 'server.log'}")
-                time.sleep(0.05)
-            if not info:
-                raise RuntimeError(f"Server startup timed out; see {state / 'server.log'}")
+            _, info = start_server(root, state)
     request = urllib.request.Request(
         info["url"] + args.action, data=b"", headers={"X-Review-Token": info["token"]}
     )

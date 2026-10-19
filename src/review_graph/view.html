@@ -51,7 +51,7 @@
     }
     main {
       display: grid;
-      grid-template-columns: 330px 1fr;
+      grid-template-columns: minmax(330px, 390px) minmax(0, 1fr);
       height: calc(100vh - 121px);
     }
     aside {
@@ -62,6 +62,21 @@
     #canvas {
       overflow: hidden;
       position: relative;
+    }
+    #direction-tip {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      z-index: 1;
+      max-width: calc(100% - 32px);
+      margin: 0;
+      padding: 10px 14px;
+      border: 1px solid #303d50;
+      border-radius: 8px;
+      background: #182131;
+      color: #c6d4e7;
+      font-size: 13px;
+      pointer-events: none;
     }
     svg {
       width: 100%;
@@ -92,17 +107,55 @@
       color: #f5c781;
       font-size: 12px;
     }
-    #files button {
-      display: block;
-      width: 100%;
-      text-align: left;
-      margin: 7px 0;
-      overflow-wrap: anywhere;
-      font: 12px ui-monospace, monospace;
-    }
     h2 {
       font-size: 15px;
     }
+    #detail-title {
+      overflow-wrap: anywhere;
+      color: #7ee2a8;
+      font-size: 20px;
+      line-height: 1.4;
+    }
+    .detail-summary, .file-path {
+      color: #a4b3c8;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .detail-summary { margin: 0 0 16px; }
+    .connection-group { margin: 22px 0 10px; font-size: 16px; color: #9ac2ff; }
+    .connection-card {
+      background: #182131;
+      border: 1px solid #303d50;
+      border-radius: 10px;
+      padding: 14px;
+      margin: 10px 0;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+    .connection-file {
+      padding: 0;
+      border: 0;
+      background: none;
+      color: #9ac2ff;
+      text-align: left;
+      font: inherit;
+      font-weight: 600;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+    .connection-file:focus-visible { outline: 2px solid #9ac2ff; outline-offset: 3px; }
+    .file-path { display: block; margin: 3px 0 10px; }
+    .relation-list { list-style: none; padding: 0; margin: 0 0 12px; }
+    .relation-list li { margin: 8px 0; font-size: 14px; color: #edf3fc; }
+    .relation-list strong { color: #b8d6ff; font-weight: 600; }
+    .connection-card details {
+      border-top: 1px solid #303d50;
+      padding-top: 10px;
+      margin-top: 12px;
+      color: #a4b3c8;
+      font-size: 12px;
+    }
+    .connection-card summary { cursor: pointer; }
     pre {
       font-size: 11px;
       white-space: pre-wrap;
@@ -187,25 +240,20 @@
     ><span class="context">● Bez zmian · bezpośredni sąsiedzi</span
     ><span class="deleted">┄ Usunięte / stara nazwa</span
     ><small
-      >Strzałka = kierunek relacji Graphify · kółko myszy: zoom · przeciąganie:
+      >Kółko myszy: zoom · przeciąganie:
       przesuwanie</small
     >
   </div>
   <main>
     <aside>
       <div id="notice"></div>
-      <h2>Zmienione pliki</h2>
-      <small
-        >Graf opisuje bieżące pliki robocze. Status Git obejmuje też
-        indeks.</small
-      >
-      <div id="files"></div>
       <h2 id="detail-title">Powiązania</h2>
       <div id="detail">
-        Kliknij plik lub krawędź, aby zobaczyć rodzaj relacji i dowody Graphify.
+        Kliknij plik lub strzałkę na grafie, aby poznać jego połączenia.
       </div>
     </aside>
     <div id="canvas">
+      <p id="direction-tip"><strong>A → B</strong> oznacza, że A wykorzystuje B</p>
       <svg id="svg" aria-label="Graf plików">
         <defs>
           <marker
@@ -233,7 +281,10 @@
       selected = null,
       box = null,
       extent = null,
-      drag = null;
+      drag = null,
+      positions = new Map(),
+      terminalSelection = null,
+      appliedSelection = -1;
     function el(tag, attrs = {}, content) {
       const n = document.createElementNS(ns, tag);
       for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
@@ -260,26 +311,91 @@
         ),
       ].join(", ");
     }
-    function evidence(edges) {
-      $("detail").replaceChildren();
+    function html(tag, className, content) {
+      const node = document.createElement(tag);
+      node.className = className;
+      if (content !== undefined) node.textContent = content;
+      return node;
+    }
+    function relationKind(item) {
+      return String(item.relation || item.relationship || item.type || "").trim().toLowerCase();
+    }
+    function relationVerb(kind) {
+      const descriptions = {
+        imports: "importuje plik",
+        imports_from: "importuje elementy z pliku",
+        calls: "wywołuje kod z pliku",
+        indirect_call: "pośrednio wywołuje kod z pliku",
+        inherits: "dziedziczy po elementach z pliku",
+        inherits_from: "dziedziczy po elementach z pliku",
+        extends: "rozszerza elementy z pliku",
+        implements: "implementuje interfejs z pliku",
+        uses: "korzysta z elementów pliku",
+        depends_on: "zależy od pliku",
+        contains: "zawiera elementy z pliku",
+        includes: "dołącza plik",
+        re_exports: "udostępnia dalej elementy z pliku",
+        references: "odwołuje się do elementów pliku",
+        tests: "testuje kod z pliku",
+      };
+      return Object.hasOwn(descriptions, kind) ? descriptions[kind] : null;
+    }
+    function relationSentence(kind, source, target) {
+      const sentence = html("li", "");
+      const verb = relationVerb(kind);
+      sentence.append(html("strong", "", source),
+        html("span", "", ` ${verb || "ma powiązanie z plikiem"} `),
+        html("strong", "", target), html("span", "", "."));
+      return sentence;
+    }
+    function evidence(edges, focus = selected) {
+      const detail = $("detail");
+      detail.replaceChildren();
       if (!edges.length) {
-        $("detail").textContent =
-          "Brak międzyplikowych powiązań w aktualnych danych Graphify. Nie dodajemy domyślnych relacji.";
+        detail.textContent = focus
+          ? "Graphify nie znalazł połączeń tego pliku z innymi plikami w bieżącej analizie."
+          : "Kliknij plik lub strzałkę na grafie, aby poznać jego połączenia.";
         return;
       }
-      for (const e of edges) {
-        const h = document.createElement("p");
-        h.textContent = `${e.source} → ${e.target} · ${kinds(e)} (${
-          e.evidence.length
-        })`;
-        $("detail").append(h);
-        const d = document.createElement("details"),
-          s = document.createElement("summary"),
-          p = document.createElement("pre");
-        s.textContent = "Dowody i metadane Graphify";
-        p.textContent = JSON.stringify(e.evidence, null, 2);
-        d.append(s, p);
-        $("detail").append(d);
+      const neighbors = new Set(edges.flatMap(e => [e.source, e.target]).filter(id => id !== focus));
+      detail.append(html("p", "detail-summary", focus
+        ? `Połączone pliki: ${neighbors.size}. Każdy opis mówi, co jeden plik robi z kodem drugiego.`
+        : "Poniżej przeczytasz, jak te pliki są ze sobą powiązane."));
+      const focusName = focus && focus.split("/").pop();
+      const groups = focus ? [
+        {title: `Co robi ${focusName}`, edges: edges.filter(e => e.source === focus)},
+        {title: `Jak inne pliki korzystają z ${focusName}`, edges: edges.filter(e => e.target === focus)},
+      ] : [{title: "Połączenie między plikami", edges}];
+      for (const group of groups) {
+        if (!group.edges.length) continue;
+        detail.append(html("h3", "connection-group", `${group.title} (${group.edges.length})`));
+        for (const e of group.edges) {
+          const card = html("article", "connection-card");
+          const sameName = e.source.split("/").pop() === e.target.split("/").pop();
+          const sourceName = sameName ? e.source : e.source.split("/").pop();
+          const targetName = sameName ? e.target : e.target.split("/").pop();
+          const list = html("ul", "relation-list");
+          const relations = new Set(e.evidence.map(relationKind));
+          for (const kind of relations) {
+            list.append(relationSentence(kind, sourceName, targetName));
+          }
+          card.append(list);
+          // Always show full paths, including when two files have the same name.
+          const endpoints = focus ? [e.source === focus ? e.target : e.source] : [e.source, e.target];
+          for (const [index, id] of endpoints.entries()) {
+            if (!focus) card.append(html("small", "file-path", index ? "Do pliku" : "Z pliku"));
+            const button = html("button", "connection-file", id.split("/").pop());
+            button.type = "button";
+            button.title = id;
+            button.onclick = () => select(id);
+            card.append(button, html("span", "file-path", id));
+          }
+          const details = html("details", "");
+          details.append(html("summary", "", "Dane techniczne Graphify"),
+            html("pre", "", JSON.stringify(e.evidence, null, 2)));
+          card.append(details);
+          detail.append(card);
+        }
       }
     }
     function select(id) {
@@ -287,6 +403,27 @@
       $("detail-title").textContent = id || "Powiązania";
       evidence(graph.edges.filter((e) => e.source === id || e.target === id));
       draw();
+    }
+    function followTerminalSelection(force = false) {
+      if (!graph || !terminalSelection ||
+          (!force && terminalSelection.revision === appliedSelection)) return;
+      appliedSelection = terminalSelection.revision;
+      const id = terminalSelection.path;
+      if (id && !graph.nodes.some(n => n.id === id)) {
+        select(null);
+        $("detail-title").textContent = id;
+        $("detail").textContent = "Pliku nie ma w bieżącym grafie. Naciśnij r w terminalu, aby odświeżyć analizę.";
+        return;
+      }
+      select(id);
+      const position = positions.get(id);
+      if (!position) return;
+      const w = $("svg").clientWidth, h = $("svg").clientHeight;
+      if (!w || !h) return;
+      const width = Math.max(600, w), height = width * h / w;
+      box = [position[0] + 190 - width / 2,
+             position[1] + 38 - height / 2, width, height];
+      view();
     }
     function view() {
       if (box) $("svg").setAttribute("viewBox", box.join(" "));
@@ -307,9 +444,11 @@
           all.filter((n) => n.id.toLowerCase().includes(query)).map((n) => n.id)
         );
       const edges = graph.edges.filter(
-        (e) => match.has(e.source) || match.has(e.target)
+        (e) => match.has(e.source) || match.has(e.target) ||
+               e.source === selected || e.target === selected
       );
       const visible = new Set(match);
+      if (selected) visible.add(selected);
       edges.forEach((e) => {
         visible.add(e.source);
         visible.add(e.target);
@@ -318,6 +457,7 @@
       const changed = nodes.filter((n) => n.changed),
         context = nodes.filter((n) => !n.changed);
       const pos = new Map();
+      positions = pos;
       [changed, context].forEach((group, col) =>
         group.forEach((n, i) => pos.set(n.id, [col * 770 + 40, i * 100 + 35]))
       );
@@ -373,7 +513,7 @@
         p.append(title);
         const click = () => {
           $("detail-title").textContent = "Relacja między plikami";
-          evidence([e]);
+          evidence([e], null);
         };
         p.onclick = click;
         label.onclick = click;
@@ -481,13 +621,6 @@
           } sąsiadów · ${graph.edges.length} relacji plików · ${
             graph.generated
           }`;
-          $("files").replaceChildren();
-          for (const n of changed) {
-            const b = document.createElement("button");
-            b.textContent = n.id + "\n" + status(n);
-            b.onclick = () => select(n.id);
-            $("files").append(b);
-          }
           draw();
           if (selected)
             evidence(
@@ -495,15 +628,30 @@
                 (e) => e.source === selected || e.target === selected
               )
             );
+          followTerminalSelection(true);
         }
       } catch (e) {
         $(
           "notice"
-        ).textContent = `Utracono połączenie: ${e.message}. Ponów Spacja g r w Neovimie.`;
+        ).textContent = `Utracono połączenie: ${e.message}. Uruchom ponownie review . w terminalu.`;
       } finally {
         setTimeout(poll, 2000);
       }
     }
+    async function pollSelection() {
+      try {
+        const response = await fetch("selection", {cache: "no-store"});
+        if (response.ok) {
+          terminalSelection = await response.json();
+          followTerminalSelection();
+        }
+      } catch (_) {
+        // The data poll displays connection errors; retain the current graph.
+      } finally {
+        setTimeout(pollSelection, 250);
+      }
+    }
     poll();
+    pollSelection();
   </script>
 </html>
